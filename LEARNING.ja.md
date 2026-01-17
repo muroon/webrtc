@@ -103,6 +103,122 @@
 6. RFCを参照しながら詳細を理解
 ```
 
+## examples/を活用した学習ガイド
+
+### Phase 1: Signalingの理解
+
+**目標**: Offer/Answer、SDP、ICE候補の交換を理解する
+
+| 順序 | サンプル | 学べること |
+|------|---------|-----------|
+| 1 | `data-channels` | 手動Signaling、SDPの中身を見る |
+| 2 | `pion-to-pion` | ブラウザなしで純粋なGo同士の接続 |
+| 3 | `trickle-ice` | ICE候補の逐次交換 |
+
+```bash
+# まずdata-channelsで手動Signalingを体験
+cd examples/data-channels && go run main.go
+
+# 次にpion-to-pionでGoだけで完結する例を見る
+cd examples/pion-to-pion
+go run offer/main.go  # ターミナル1
+go run answer/main.go # ターミナル2
+```
+
+### Phase 2: DataChannel API
+
+**目標**: データ送受信の仕組みを理解する
+
+| 順序 | サンプル | 学べること |
+|------|---------|-----------|
+| 4 | `data-channels-detach` | 低レベルAPI、io.Reader/Writer |
+| 5 | `data-channels-flow-control` | バックプレッシャー、フロー制御 |
+| 6 | `ortc` | ORTC API（PeerConnectionを使わない方法） |
+
+### Phase 3: ICEの深堀り
+
+**目標**: NAT越え、接続確立の詳細を理解する
+
+| 順序 | サンプル | 学べること |
+|------|---------|-----------|
+| 7 | `ice-restart` | ネットワーク切り替え時の再接続 |
+| 8 | `ice-single-port` | 本番環境向け：単一ポートで複数接続 |
+| 9 | `ice-tcp` | UDP blocked環境への対応 |
+
+### Phase 4: メディア基礎
+
+**目標**: 音声・映像の送受信を理解する
+
+| 順序 | サンプル | 学べること |
+|------|---------|-----------|
+| 10 | `play-from-disk` | ファイル→ブラウザへ動画送信 |
+| 11 | `save-to-disk` | ブラウザ→サーバーへ録画保存 |
+| 12 | `reflect` | 受信したメディアをそのまま返す |
+
+```bash
+# play-from-diskを試す（VP8動画ファイルが必要）
+cd examples/play-from-disk
+go run main.go
+```
+
+### Phase 5: メディア応用
+
+**目標**: 実践的なメディア処理を理解する
+
+| 順序 | サンプル | 学べること |
+|------|---------|-----------|
+| 13 | `broadcast` | 1対多配信（SFU的パターン） |
+| 14 | `simulcast` | 複数品質ストリームの処理 |
+| 15 | `swap-tracks` | 動的なトラック切り替え |
+| 16 | `rtcp-processing` | RTCP統計情報の取得 |
+
+### Phase 6: RTP/RTCP直接操作
+
+**目標**: 低レベルのメディア処理を理解する
+
+| 順序 | サンプル | 学べること |
+|------|---------|-----------|
+| 17 | `rtp-forwarder` | RTPパケットの転送 |
+| 18 | `rtp-to-webrtc` | 外部RTPソースの取り込み |
+| 19 | `insertable-streams` | E2E暗号化 |
+
+### Phase 7: 本番環境向け
+
+**目標**: 運用に必要な知識を得る
+
+| 順序 | サンプル | 学べること |
+|------|---------|-----------|
+| 20 | `custom-logger` | ログのカスタマイズ |
+| 21 | `stats` | 接続統計の取得 |
+| 22 | `vnet` | ネットワークシミュレーション |
+
+### 推奨する学習フロー
+
+```
+Phase 1 (Signaling)
+    │
+    ├─→ Phase 2 (DataChannel) ─→ チャットアプリなど作れる
+    │
+    └─→ Phase 3 (ICE) ─→ Phase 4 (メディア基礎)
+                              │
+                              ├─→ Phase 5 (メディア応用) ─→ 配信アプリなど作れる
+                              │
+                              └─→ Phase 6 (RTP/RTCP) ─→ SFU/MCU開発へ
+                                        │
+                                        └─→ Phase 7 (本番運用)
+```
+
+### 各サンプルで見るべきポイント
+
+| Phase | 注目ファイル/コード |
+|-------|-------------------|
+| 1 | `main.go`の`CreateOffer`/`CreateAnswer`周辺 |
+| 2 | `OnDataChannel`、`OnMessage`コールバック |
+| 3 | `OnICECandidate`、`AddICECandidate` |
+| 4 | `AddTrack`、`OnTrack`コールバック |
+| 5 | `RTPSender`、`RTPReceiver`の操作 |
+| 6 | `ReadRTP`、`WriteRTP`の使い方 |
+
 ## このコードベースの特徴的なパターン
 
 ### 1. atomic.Valueによる状態管理

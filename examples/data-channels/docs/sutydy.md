@@ -93,3 +93,30 @@ STUNサーバーはデータの中継は一切しない。役割は1つだけ：
 ### P2P直接通信ができない場合
 
 NATの種類によってはSTUNだけでは相手に直接到達できないことがある。その場合は**TURNサーバー**（リレーサーバー）が必要になるが、このサンプルではTURNは設定されていない。
+
+## トランシーバー（RTPTransceiver）について
+
+このサンプルでは**トランシーバーは使われていない**。DataChannelのみを使用している。
+
+### トランシーバーとDataChannelの違い
+
+| 機能 | 用途 | プロトコル | このサンプル |
+|---|---|---|---|
+| **RTPTransceiver** | 音声・映像（メディア）の送受信 | RTP/SRTP | 未使用 |
+| **DataChannel** | 任意のテキスト/バイナリデータの送受信 | SCTP | 使用 |
+
+トランシーバーはRTP（Real-time Transport Protocol）を使ってメディアストリームを扱うためのもので、内部的に `RTPSender` + `RTPReceiver` のペアで構成される。
+
+一方、DataChannelは **SCTP** プロトコル上で動作するため、RTPトランシーバーとは全く別の経路を使う。
+
+### トランスポートスタックの違い
+
+```
+メディア通信（トランシーバー使用時）:
+  ICE → DTLS → SRTP → RTPTransceiver（音声/映像）
+
+DataChannel通信（このサンプル）:
+  ICE → DTLS → SCTP → DataChannel（テキスト/バイナリ）
+```
+
+トランシーバーが使われているサンプルは `examples/play-from-disk/` や `examples/rtp-to-webrtc/` など、メディアを扱うサンプルを参照。

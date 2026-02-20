@@ -120,3 +120,115 @@ DataChannel通信（このサンプル）:
 ```
 
 トランシーバーが使われているサンプルは `examples/play-from-disk/` や `examples/rtp-to-webrtc/` など、メディアを扱うサンプルを参照。
+
+## SDPの具体的な内容
+
+このサンプルはDataChannelのみを使うため、SDPは非常にシンプルになる。
+
+### ブラウザ側が生成するOffer SDPの例
+
+```
+v=0
+o=- 1234567890 2 IN IP4 127.0.0.1
+s=-
+t=0 0
+a=group:BUNDLE 0
+a=extmap-allow-mixed
+a=msid-semantic: WMS
+
+m=application 9 UDP/DTLS/SCTP webrtc-datachannel
+c=IN IP4 0.0.0.0
+a=ice-ufrag:abCD
+a=ice-pwd:xxxxxxxxxxxxxxxxxxxxxxxx
+a=ice-options:trickle
+a=fingerprint:sha-256 AA:BB:CC:DD:...
+a=setup:actpass
+a=mid:0
+a=sctp-port:5000
+a=max-message-size:262144
+```
+
+### 各行の意味
+
+| 行 | 意味 |
+|---|---|
+| `v=0` | SDPバージョン（常に0） |
+| `o=- ...` | セッション発信者情報（セッションID、バージョン） |
+| `s=-` | セッション名（未指定） |
+| `t=0 0` | セッション時間（常時有効） |
+| `a=group:BUNDLE 0` | 全メディアを1つのトランスポートにまとめる |
+| **`m=application 9 UDP/DTLS/SCTP webrtc-datachannel`** | **メディア行：DataChannel用** |
+| `UDP/DTLS/SCTP` | プロトコルスタック（UDP上のDTLS上のSCTP） |
+| `webrtc-datachannel` | DataChannelであることを示す |
+| `a=ice-ufrag` / `a=ice-pwd` | ICE認証用の資格情報 |
+| `a=fingerprint:sha-256 ...` | DTLS証明書のフィンガープリント（相手の検証用） |
+| `a=setup:actpass` | DTLS接続時のロール（Offerはactpass、Answerはactive） |
+| `a=mid:0` | メディアセクションの識別子 |
+| `a=sctp-port:5000` | SCTPのポート番号 |
+| `a=max-message-size:262144` | DataChannelの最大メッセージサイズ（256KB） |
+
+### メディアサンプルとの違い
+
+```
+DataChannelのみ（このサンプル）:
+  m=application 9 UDP/DTLS/SCTP webrtc-datachannel  ← 1セクションだけ
+
+音声+映像+DataChannel の場合:
+  m=audio 9 UDP/TLS/RTP/SAVPF 111 ...    ← 音声コーデック情報
+  m=video 9 UDP/TLS/RTP/SAVPF 96 ...     ← 映像コーデック情報
+  m=application 9 UDP/DTLS/SCTP webrtc-datachannel
+```
+
+メディアを扱うサンプルでは `m=audio` や `m=video` セクションが追加され、コーデック情報（`a=rtpmap`）、帯域制御（`a=rtcp-fb`）、トランシーバーの方向（`a=sendrecv` / `a=recvonly`）なども含まれる。
+
+### ICE Gathering完了後のSDP
+
+コード上で `GatheringCompletePromise` を待ってからSDPを出力しているため、実際に交換されるSDPにはICE Candidateも含まれる：
+
+```
+a=candidate:1 1 udp 2130706431 192.168.1.10 54321 typ host
+a=candidate:2 1 udp 1694498815 203.0.113.5 12345 typ srflx raddr 192.168.1.10 rport 54321
+```
+
+| Candidateタイプ | 意味 |
+|---|---|
+| `host` | ローカルIPアドレス（LAN内の直接アドレス） |
+| `srflx` | STUNで取得したグローバルIPアドレス（Server Reflexive） |
+
+これが「STUNで取得したアドレスがSDPに含まれる」部分の実体。
+
+## SDPを生成しているソースコード
+
+### 呼び出しの流れ
+
+```
+examples/data-channels/main.go
+  └─ peerConnection.CreateAnswer()
+       └─ peerconnection.go:902  pc.generateMatchedSDP()
+            └─ sdp.go:692        populateSDP()
+                 └─ sdp.go:735   addDataMediaSection()   ← DataChannel用SDPを生成
+```
+
+### SDP各部分とソースの対応
+
+| SDPの内容 | 生成箇所 |
+|---|---|
+| `v=0`, `o=`, `s=`, `t=`（セッション基本情報） | `pion/sdp/v3` の `jsep.go:69` `NewJSEPSessionDescription()` |
+| `a=group:BUNDLE`（バンドル） | `sdp.go:792-794` `populateSDP()` 内 |
+| `a=msid-semantic: WMS *` | `peerconnection.go:2905` `generateMatchedSDP()` |
+| `m=application 9 UDP/DTLS/SCTP webrtc-datachannel` | `sdp.go:373-379` `addDataMediaSection()` |
+| `c=IN IP4 0.0.0.0`（接続情報） | `sdp.go:380-386` `addDataMediaSection()` |
+| `a=setup:active`（DTLSロール） | `sdp.go:388` `addDataMediaSection()` |
+| `a=mid:0`（メディアID） | `sdp.go:389` `addDataMediaSection()` |
+| `a=sctp-port:5000` | `sdp.go:391` `addDataMediaSection()` |
+| `a=max-message-size:262144` | `sdp.go:392` `addDataMediaSection()` |
+| `a=ice-ufrag` / `a=ice-pwd`（ICE認証） | `sdp.go:393` `WithICECredentials()` |
+| `a=fingerprint:sha-256 ...`（DTLS証明書） | `sdp.go:395-397` `addDataMediaSection()` |
+| `a=candidate:...`（ICE候補） | `sdp.go:399-401` `addCandidatesToMediaDescriptions()` |
+
+### 特に重要なファイル
+
+- **`sdp.go:362` `addDataMediaSection()`** — DataChannel用SDP（`m=application`行）の実体。SDPで見える内容がほぼそのまま読める
+- **`peerconnection.go:865` `CreateAnswer()`** — DTLSロールの決定、`generateMatchedSDP()`の呼び出し
+- **`peerconnection.go:2895` `generateMatchedSDP()`** — ICEパラメータ取得、DataChannelかメディアかの分岐（`section.data`が`true`なら`addDataMediaSection`へ）
+- **`pion/sdp/v3` `jsep.go:69` `NewJSEPSessionDescription()`** — `v=0`, `o=`, `s=`, `t=` などSDPのヘッダ部分

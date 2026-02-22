@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strconv"
 
 	"github.com/pion/interceptor"
@@ -140,6 +141,19 @@ func main() {
 
 	// Get the LocalDescription and take it to base64 so we can paste in browser
 	fmt.Println(encode(peerConnection.LocalDescription()))
+
+	// TMP
+	// write ./localDescription.txt
+	file, err := os.Create("localDescription.txt")
+	if err != nil {
+		panic(err)
+	}
+	defer file.Close()
+
+	_, err = file.WriteString(encode(peerConnection.LocalDescription()))
+	if err != nil {
+		panic(err)
+	}
 
 	localTrack := <-localTrackChan
 	for {

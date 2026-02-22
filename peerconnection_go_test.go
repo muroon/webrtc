@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2023 The Pion community <https://pion.ly>
+// SPDX-FileCopyrightText: 2026 The Pion community <https://pion.ly>
 // SPDX-License-Identifier: MIT
 
 //go:build !js
@@ -17,6 +17,7 @@ import (
 	"math/big"
 	"net"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -34,6 +35,7 @@ import (
 	"github.com/pion/webrtc/v4/internal/util"
 	"github.com/pion/webrtc/v4/pkg/rtcerr"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // newPair creates two new peer connections (an offerer and an answerer) using
@@ -84,7 +86,7 @@ func TestNew_Go(t *testing.T) {
 			RTCPMuxPolicy:        RTCPMuxPolicyNegotiate,
 			PeerIdentity:         "unittest",
 			Certificates:         []Certificate{*certificate},
-			ICECandidatePoolSize: 5,
+			ICECandidatePoolSize: 1,
 		})
 		assert.Nil(t, err)
 		assert.NotNil(t, pc)
@@ -199,7 +201,7 @@ func TestPeerConnection_SetConfiguration_Go(t *testing.T) {
 				pc, err := api.NewPeerConnection(Configuration{
 					PeerIdentity:         "unittest",
 					Certificates:         []Certificate{*certificate1},
-					ICECandidatePoolSize: 5,
+					ICECandidatePoolSize: 1,
 				})
 				if err != nil {
 					return pc, err
@@ -229,7 +231,7 @@ func TestPeerConnection_SetConfiguration_Go(t *testing.T) {
 					RTCPMuxPolicy:        RTCPMuxPolicyRequire,
 					PeerIdentity:         "unittest",
 					Certificates:         []Certificate{*certificate1},
-					ICECandidatePoolSize: 5,
+					ICECandidatePoolSize: 1,
 				})
 				if err != nil {
 					return pc, err
@@ -294,6 +296,16 @@ func TestPeerConnection_SetConfiguration_Go(t *testing.T) {
 
 		assert.NoError(t, pc.Close())
 	}
+}
+
+func TestPeerConnection_GetConfiguration_Go(t *testing.T) {
+	pc, err := NewPeerConnection(Configuration{})
+	assert.NoError(t, err)
+
+	cfg := pc.GetConfiguration()
+	assert.Equal(t, false, cfg.AlwaysNegotiateDataChannels)
+
+	assert.NoError(t, pc.Close())
 }
 
 func TestPeerConnection_EventHandlers_Go(t *testing.T) {
@@ -2529,4 +2541,158 @@ func TestCreateAnswerPassiveOfferActiveAnswer(t *testing.T) {
 	answerRole := dtlsRoleFromSDP(answer.parsed)
 	assert.Equal(t, answerRole, DTLSRoleClient)
 	assert.NoError(t, pc.Close())
+}
+
+func TestAlwaysNegotiateDataChannel_InitialOffer_Go(t *testing.T) {
+	pcDefault, err := NewPeerConnection(Configuration{})
+	assert.NoError(t, err)
+
+	offerDefault, err := pcDefault.CreateOffer(nil)
+	assert.NoError(t, err)
+	assert.Nil(t, haveDataChannel(&offerDefault))
+	assert.NoError(t, pcDefault.Close())
+
+	pc, err := NewPeerConnection(Configuration{AlwaysNegotiateDataChannels: true})
+	assert.NoError(t, err)
+
+	offer, err := pc.CreateOffer(nil)
+	assert.NoError(t, err)
+	assert.NotNil(t, haveDataChannel(&offer))
+	assert.NoError(t, pc.Close())
+}
+
+func TestAlwaysNegotiateDataChannels_CreateDataChannel(t *testing.T) { //nolint:cyclop
+	lim := test.TimeOut(time.Second * 30)
+	defer lim.Stop()
+
+	report := test.CheckRoutines(t)
+	defer report()
+
+	cfg := Configuration{AlwaysNegotiateDataChannels: true}
+
+	pcOffer, err := NewPeerConnection(cfg)
+	require.NoError(t, err)
+	pcAnswer, err := NewPeerConnection(cfg)
+	require.NoError(t, err)
+
+	defer closePairNow(t, pcOffer, pcAnswer)
+
+	negotiationNeeded := make(chan struct{}, 1)
+	pcOffer.OnNegotiationNeeded(func() {
+		select {
+		case negotiationNeeded <- struct{}{}:
+		default:
+		}
+	})
+
+	remoteDataChannel := make(chan *DataChannel, 1)
+	pcAnswer.OnDataChannel(func(dc *DataChannel) {
+		select {
+		case remoteDataChannel <- dc:
+		default:
+		}
+	})
+
+	connectedWG := untilConnectionState(PeerConnectionStateConnected, pcOffer, pcAnswer)
+	require.NoError(t, signalPairWithOptions(pcOffer, pcAnswer, withDisableInitialDataChannel(true)))
+
+	connected := make(chan struct{})
+	go func() {
+		connectedWG.Wait()
+		close(connected)
+	}()
+
+	select {
+	case <-connected:
+	case <-time.After(10 * time.Second):
+		assert.FailNow(t, "connection establishment timed out")
+	}
+
+	// Verify no data channels initially exist
+	pcOffer.sctpTransport.lock.Lock()
+	offerDCCount := len(pcOffer.sctpTransport.dataChannels)
+	pcOffer.sctpTransport.lock.Unlock()
+	pcAnswer.sctpTransport.lock.Lock()
+	answerDCCount := len(pcAnswer.sctpTransport.dataChannels)
+	pcAnswer.sctpTransport.lock.Unlock()
+	require.Equal(t, 0, offerDCCount)
+	require.Equal(t, 0, answerDCCount)
+
+	select {
+	case <-remoteDataChannel:
+		assert.FailNow(t, "unexpected OnDataChannel before CreateDataChannel")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	// Now create a data channel and verify it works as expected
+	localDC, err := pcOffer.CreateDataChannel("post-connect", nil)
+	require.NoError(t, err)
+
+	localOpened := make(chan struct{}, 1)
+	localDC.OnOpen(func() {
+		select {
+		case localOpened <- struct{}{}:
+		default:
+		}
+	})
+
+	select {
+	case <-negotiationNeeded:
+		assert.FailNow(t, "unexpected OnNegotiationNeeded for CreateDataChannel")
+	case <-time.After(250 * time.Millisecond):
+	}
+
+	var remoteDC *DataChannel
+	select {
+	case remoteDC = <-remoteDataChannel:
+	case <-time.After(5 * time.Second):
+		assert.FailNow(t, "timed out waiting for remote OnDataChannel")
+	}
+
+	remoteOpened := make(chan struct{}, 1)
+	remoteDC.OnOpen(func() {
+		select {
+		case remoteOpened <- struct{}{}:
+		default:
+		}
+	})
+
+	select {
+	case <-localOpened:
+	case <-time.After(5 * time.Second):
+		assert.FailNow(t, "timed out waiting for local data channel open")
+	}
+
+	select {
+	case <-remoteOpened:
+	case <-time.After(5 * time.Second):
+		assert.FailNow(t, "timed out waiting for remote data channel open")
+	}
+}
+
+func TestNoDuplicatedAttributesInMediaDescriptions(t *testing.T) { //nolint:cyclop
+	pcOffer, err := NewPeerConnection(Configuration{})
+	require.NoError(t, err)
+	defer func() {
+		assert.NoError(t, pcOffer.Close())
+	}()
+
+	_, err = pcOffer.AddTransceiverFromKind(RTPCodecTypeVideo)
+	require.NoError(t, err)
+	_, err = pcOffer.AddTransceiverFromKind(RTPCodecTypeAudio)
+	require.NoError(t, err)
+	_, err = pcOffer.CreateDataChannel("initial_data_channel", nil)
+	require.NoError(t, err)
+
+	offer, err := pcOffer.CreateOffer(nil)
+	require.NoError(t, err)
+
+	for _, md := range offer.parsed.MediaDescriptions {
+		attrs := make([]string, 0)
+		for _, attr := range md.Attributes {
+			str := fmt.Sprintf("%s %s", attr.Key, attr.Value)
+			assert.Falsef(t, slices.Contains(attrs, str), "duplicate attribute found: %s", str)
+			attrs = append(attrs, str)
+		}
+	}
 }

@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2023 The Pion community <https://pion.ly>
+// SPDX-FileCopyrightText: 2026 The Pion community <https://pion.ly>
 // SPDX-License-Identifier: MIT
 
 // HTTP server that demonstrates Pion WebRTC examples
@@ -52,7 +52,7 @@ func serve(addr string) error {
 	http.HandleFunc("/", func(res http.ResponseWriter, req *http.Request) {
 		url := req.URL.Path
 		if url == "/wasm_exec.js" {
-			http.FileServer(http.Dir(filepath.Join(build.Default.GOROOT, "misc/wasm/"))).ServeHTTP(res, req)
+			http.FileServer(http.Dir(filepath.Join(build.Default.GOROOT, "lib/wasm/"))).ServeHTTP(res, req)
 
 			return
 		}

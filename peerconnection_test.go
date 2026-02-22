@@ -1,9 +1,10 @@
-// SPDX-FileCopyrightText: 2023 The Pion community <https://pion.ly>
+// SPDX-FileCopyrightText: 2026 The Pion community <https://pion.ly>
 // SPDX-License-Identifier: MIT
 
 package webrtc
 
 import (
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -31,17 +32,46 @@ func newPair() (pcOffer *PeerConnection, pcAnswer *PeerConnection, err error) {
 	return pca, pcb, nil
 }
 
-func signalPairWithModification(
+type signalPairOptions struct {
+	disableInitialDataChannel bool
+	modificationFunc          func(string) string
+}
+
+func withModificationFunc(f func(string) string) func(*signalPairOptions) {
+	return func(o *signalPairOptions) {
+		o.modificationFunc = f
+	}
+}
+
+func withDisableInitialDataChannel(disable bool) func(*signalPairOptions) {
+	return func(o *signalPairOptions) {
+		o.disableInitialDataChannel = disable
+	}
+}
+
+func signalPairWithOptions(
 	pcOffer *PeerConnection,
 	pcAnswer *PeerConnection,
-	modificationFunc func(string) string,
+	opts ...func(*signalPairOptions),
 ) error {
-	// Note(albrow): We need to create a data channel in order to trigger ICE
-	// candidate gathering in the background for the JavaScript/Wasm bindings. If
-	// we don't do this, the complete offer including ICE candidates will never be
-	// generated.
-	if _, err := pcOffer.CreateDataChannel("initial_data_channel", nil); err != nil {
-		return err
+	var options signalPairOptions
+	for _, o := range opts {
+		o(&options)
+	}
+
+	modificationFunc := options.modificationFunc
+	if modificationFunc == nil {
+		modificationFunc = func(s string) string { return s }
+	}
+
+	if !options.disableInitialDataChannel {
+		// Note(albrow): We need to create a data channel in order to trigger ICE
+		// candidate gathering in the background for the JavaScript/Wasm bindings. If
+		// we don't do this, the complete offer including ICE candidates will never be
+		// generated.
+		if _, err := pcOffer.CreateDataChannel("initial_data_channel", nil); err != nil {
+			return err
+		}
 	}
 
 	offer, err := pcOffer.CreateOffer(nil)
@@ -70,6 +100,18 @@ func signalPairWithModification(
 	<-answerGatheringComplete
 
 	return pcOffer.SetRemoteDescription(*pcAnswer.LocalDescription())
+}
+
+func signalPairWithModification(
+	pcOffer *PeerConnection,
+	pcAnswer *PeerConnection,
+	modificationFunc func(string) string,
+) error {
+	return signalPairWithOptions(
+		pcOffer,
+		pcAnswer,
+		withModificationFunc(modificationFunc),
+	)
 }
 
 func signalPair(pcOffer *PeerConnection, pcAnswer *PeerConnection) error {
@@ -131,7 +173,7 @@ func TestNew(t *testing.T) {
 		BundlePolicy:         BundlePolicyMaxCompat,
 		RTCPMuxPolicy:        RTCPMuxPolicyNegotiate,
 		PeerIdentity:         "unittest",
-		ICECandidatePoolSize: 5,
+		ICECandidatePoolSize: 1,
 	})
 	assert.NoError(t, err)
 	assert.NotNil(t, pc)
@@ -153,7 +195,7 @@ func TestPeerConnection_SetConfiguration(t *testing.T) {
 			name: "valid",
 			init: func() (*PeerConnection, error) {
 				pc, err := NewPeerConnection(Configuration{
-					ICECandidatePoolSize: 5,
+					ICECandidatePoolSize: 1,
 				})
 				if err != nil {
 					return pc, err
@@ -168,10 +210,11 @@ func TestPeerConnection_SetConfiguration(t *testing.T) {
 							Username: "unittest",
 						},
 					},
-					ICETransportPolicy:   ICETransportPolicyAll,
-					BundlePolicy:         BundlePolicyBalanced,
-					RTCPMuxPolicy:        RTCPMuxPolicyRequire,
-					ICECandidatePoolSize: 5,
+					ICETransportPolicy:          ICETransportPolicyAll,
+					BundlePolicy:                BundlePolicyBalanced,
+					RTCPMuxPolicy:               RTCPMuxPolicyRequire,
+					ICECandidatePoolSize:        1,
+					AlwaysNegotiateDataChannels: true,
 				})
 				if err != nil {
 					return pc, err
@@ -251,6 +294,14 @@ func TestPeerConnection_SetConfiguration(t *testing.T) {
 			},
 			wantErr: &rtcerr.InvalidModificationError{Err: ErrModifyingICECandidatePoolSize},
 		},
+		{
+			name: "enable AlwaysNegotiateDataChannels",
+			init: func() (*PeerConnection, error) {
+				return NewPeerConnection(Configuration{})
+			},
+			config:  Configuration{AlwaysNegotiateDataChannels: true},
+			wantErr: nil,
+		},
 	} {
 		pc, err := test.init()
 		assert.NoError(t, err, "SetConfiguration %q: init failed", test.name)
@@ -285,6 +336,7 @@ func TestPeerConnection_GetConfiguration(t *testing.T) {
 	// See: https://github.com/pion/webrtc/issues/513.
 	// assert.Equal(t, len(expected.Certificates), len(actual.Certificates))
 	assert.Equal(t, expected.ICECandidatePoolSize, actual.ICECandidatePoolSize)
+	assert.False(t, actual.AlwaysNegotiateDataChannels)
 	assert.NoError(t, pc.Close())
 }
 
@@ -648,6 +700,101 @@ func TestGatherOnSetLocalDescription(t *testing.T) { //nolint:cyclop
 	assert.NoError(t, pcAnswer.SetLocalDescription(answer))
 	<-pcAnswerGathered
 	closePairNow(t, pcOffer, pcAnswer)
+}
+
+// Assert that candidates are flushed by calling SetLocalDescription if ICECandidatePoolSize > 0.
+func TestFlushOnSetLocalDescription(t *testing.T) {
+	if runtime.GOARCH == "wasm" {
+		t.Skip("Skipping ICECandidatePool test on WASM")
+	}
+
+	lim := test.TimeOut(time.Second * 30)
+	defer lim.Stop()
+
+	report := test.CheckRoutines(t)
+	defer report()
+
+	pcOfferFlushStarted := make(chan SessionDescription)
+	pcAnswerFlushStarted := make(chan SessionDescription)
+
+	var offerOnce sync.Once
+	var answerOnce sync.Once
+
+	pcOffer, err := NewPeerConnection(Configuration{
+		ICECandidatePoolSize: 1,
+	})
+	assert.NoError(t, err)
+
+	// We need to create a data channel in order to set mid
+	_, err = pcOffer.CreateDataChannel("initial_data_channel", nil)
+	assert.NoError(t, err)
+
+	pcOffer.OnICECandidate(func(i *ICECandidate) {
+		offerOnce.Do(func() {
+			close(pcOfferFlushStarted)
+		})
+	})
+
+	// Assert that ICEGatheringState changes immediately
+	assert.Eventually(t, func() bool {
+		return pcOffer.ICEGatheringState() != ICEGatheringStateNew
+	}, time.Second, 10*time.Millisecond, "ICEGatheringState should switch to Gathering or Complete immediately")
+
+	// Assert that no events are fired before SetLocalDescription
+	select {
+	case <-pcOfferFlushStarted:
+		assert.Fail(t, "Flush started before SetLocalDescription")
+	case <-time.After(time.Second):
+	}
+
+	// Verify that candidates are flushed immediately after SetLocalDescription
+	offer, err := pcOffer.CreateOffer(nil)
+	assert.NoError(t, err)
+	assert.NoError(t, pcOffer.SetLocalDescription(offer))
+	<-pcOfferFlushStarted
+
+	// Create Answer PeerConnection
+	pcAnswer, err := NewPeerConnection(Configuration{
+		ICECandidatePoolSize: 1,
+	})
+	assert.NoError(t, err)
+
+	pcAnswer.OnICECandidate(func(i *ICECandidate) {
+		answerOnce.Do(func() {
+			close(pcAnswerFlushStarted)
+		})
+	})
+
+	// Assert that ICEGatheringState changes immediately
+	assert.Eventually(t, func() bool {
+		return pcAnswer.ICEGatheringState() != ICEGatheringStateNew
+	}, time.Second, 10*time.Millisecond, "ICEGatheringState should switch to Gathering or Complete immediately")
+
+	assert.NoError(t, pcAnswer.SetRemoteDescription(offer))
+	select {
+	case <-pcAnswerFlushStarted:
+		assert.Fail(t, "Flush started before SetLocalDescription")
+	case <-time.After(time.Second):
+	}
+
+	// Verify that candidates are flushed immediately after SetLocalDescription
+	answer, err := pcAnswer.CreateAnswer(nil)
+	assert.NoError(t, err)
+	assert.NoError(t, pcAnswer.SetLocalDescription(answer))
+	<-pcAnswerFlushStarted
+	closePairNow(t, pcOffer, pcAnswer)
+}
+
+func TestSetICECandidatePoolSizeLarge(t *testing.T) {
+	if runtime.GOARCH == "wasm" {
+		t.Skip("Skipping ICECandidatePool test on WASM")
+	}
+
+	pc, err := NewPeerConnection(Configuration{
+		ICECandidatePoolSize: 2,
+	})
+	assert.Nil(t, pc)
+	assert.Equal(t, &rtcerr.NotSupportedError{Err: errICECandidatePoolSizeTooLarge}, err)
 }
 
 // Assert that SetRemoteDescription handles invalid states.
